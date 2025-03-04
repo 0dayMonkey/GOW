@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tetris 3D</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; }
+        #renderCanvas { width: 100%; height: 100vh; touch-action: none; }
+        #ui {
+            position: absolute; top: 10px; left: 10px; color: white; font-family: Arial, sans-serif;
+        }
+        #gameContainer { display: none; position: absolute; top: 20px; right: 20px; color: white; }
+        #nextPiece { width: 100px; height: 100px; background: rgba(0,0,0,0.5); margin: 10px 0; }
+        button { padding: 10px; margin: 5px; background: #5f9ea0; border: none; color: white; cursor: pointer; }
+        button:disabled { background: #444; cursor: not-allowed; }
+        #gameOverModal {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7); justify-content: center; align-items: center;
+        }
+        .modal-content {
+            background: #222; padding: 20px; border-radius: 10px; text-align: center; color: white;
+        }
+        .modal-content input { width: 100%; padding: 10px; margin: 10px 0; background: #333; color: white; border: none; }
+    </style>
+</head>
+<body>
+    <canvas id="renderCanvas"></canvas>
+    <div id="ui">
+        <div>Score: <span id="score">0</span></div>
+        <div>Niveau: <span id="level">1</span></div>
+        <div>Lignes: <span id="lines">0</span></div>
+    </div>
+    <div id="gameContainer">
+        <div>Prochaine pièce:</div>
+        <canvas id="nextPiece"></canvas>
+        <div>Contrôles: ↑ (rotation), ←/→ (gauche/droite), ↓ (descente), Espace (chute), P (pause), ZQSD (caméra)</div>
+        <button id="restartGame">Relancer</button>
+        <div>Meilleurs scores:</div>
+        <div id="scoresList"></div>
+    </div>
+    <div id="gameOverModal">
+        <div class="modal-content">
+            <h2>Game Over</h2>
+            <p>Votre score: <span id="finalScore">0</span></p>
+            <input id="playerNameModal" placeholder="Pseudo" maxlength="15">
+            <button id="saveScore">Sauvegarder</button>
+            <button id="playAgain">Rejouer</button>
+        </div>
+    </div>
+
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <script>
+// 1. Nouvelles constantes pour la physique et le déplacement
+const GRAVITY = 0.01;
+const JUMP_FORCE = 0.3;
+const PLAYER_SPEED = 0.15;
+const PLAYER_HEIGHT = 1.8;
+
+
+// 2. Variables pour le joueur et l'environnement
+let player = {
+    mesh: null,
+    isJumping: false,
+    velocity: new BABYLON.Vector3(0, 0, 0),
+    onGround: false,
+    canJump: true
+};
+let world = {
+    ground: null,
+    walls: []
+};
+let canControl = true; // Peut contrôler le personnage (vs contrôler Tetris)
+let focusOnTetris = false; // Mode focus sur le jeu vs déplacement
+
+// Constantes
+const BOARD_WIDTH = 10;
+const BOARD_HEIGHT = 20;
+const CELL_SIZE = 1;
+const TETROMINOS = {
+    'I': {
+        shape: [
+            [0, 0, 0, 0],
+            [1, 1, 1, 1],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0]
+        ],
+        color: BABYLON.Color3.Teal()
+    },
+    'J': {
+        shape: [
+            [1, 0, 0],
+            [1, 1, 1],
+            [0, 0, 0]
+        ],
+        color: BABYLON.Color3.Blue()
+    },
+    'L': {
+        shape: [
+            [0, 0, 1],
+            [1, 1, 1],
+            [0, 0, 0]
+        ],
+        color: BABYLON.Color3.FromHexString("#FFA500")
+    },
+    'O': {
+        shape: [
+            [1, 1],
+            [1, 1]
+        ],
+        color: BABYLON.Color3.Yellow()
+    },
+    'S': {
+        shape: [
+            [0, 1, 1],
+            [1, 1, 0],
+            [0, 0, 0]
+        ],
+        color: BABYLON.Color3.Green()
+    },
+    'T': {
+        shape: [
+            [0, 1, 0],
+            [1, 1, 1],
+            [0, 0, 0]
+        ],
+        color: BABYLON.Color3.Purple()
+    },
+    'Z': {
+        shape: [
+            [1, 1, 0],
+            [0, 1, 1],
+            [0, 0, 0]
+        ],
+        color: BABYLON.Color3.Red()
+    }
+};
+
+// Variables
+let board = Array(BOARD_HEIGHT).fill().map(() => Array(BOARD_WIDTH).fill(0));
+let currentPiece = null,
+    nextPiece = null,
+    ghostPiece = null;
+let score = 0,
+    level = 1,
+    lines = 0,
+    gameSpeed = 1000,
+    gameInterval = null;
+let isPaused = false,
+    isGameOver = false,
+    highScores = [];
+let playerName = "Anonyme";
+// 1. Ajouter une variable pour suivre le mode de caméra
+let cameraMode = "fps"; // "fps" ou "thirdPerson"
+
+// Variables pour la rotation de la caméra en mode troisième personne
+let thirdPersonCameraRotationX = 0; // Rotation verticale (haut/bas)
+let thirdPersonCameraRotationY = 0; // Rotation horizontale (gauche/droite)
+let thirdPersonDistance = 15; // Distance de la caméra en mode 3ème personne
+
+// Variables pour les animations
+let animationState = "idle"; // "idle", "walking", "jumping"
+let animationTime = 0;
+let walkingSpeed = 0.15; // Vitesse d'animation de la marche
+
+
+
+// Babylon.js
+const canvas = document.getElementById("renderCanvas");
+const engine = new BABYLON.Engine(canvas, true);
+const scene = new BABYLON.Scene(engine);
+scene.clearColor = new BABYLON.Color4(0.1, 0.1, 0.1, 1);
+
+
+
+// 2. Fonction pour basculer entre les modes de caméra
+// Mise à jour dans toggleCameraMode pour initialiser les rotations lors du changement de mode
+function toggleCameraMode() {
+    cameraMode = cameraMode === "fps" ? "thirdPerson" : "fps";
+
+    if (cameraMode === "thirdPerson") {
+        // Initialiser les rotations de la caméra en 3ème personne sur la base de la rotation actuelle
+        thirdPersonCameraRotationY = camera.rotation.y;
+        thirdPersonCameraRotationX = 0; // Commencer avec une vue horizontale
+    }
+
+    updatePlayerCamera();
+}
+// 3. Configuration initiale de la scène (à ajouter après la création de la scène)
+function setupEnvironment() {
+    // Sol
+    world.ground = BABYLON.MeshBuilder.CreateGround("ground", {
+        width: 50,
+        height: 50,
+        subdivisions: 2
+    }, scene);
+    world.ground.position.y = -2;
+    const groundMat = new BABYLON.StandardMaterial("groundMat", scene);
+    groundMat.diffuseColor = new BABYLON.Color3(0.2, 0.2, 0.2);
+    world.ground.material = groundMat;
+    world.ground.checkCollisions = true;
+
+    // Murs (bordures)
+    const wallMat = new BABYLON.StandardMaterial("wallMat", scene);
+    wallMat.diffuseColor = new BABYLON.Color3(0.5, 0.5, 0.5);
+
+    // Mur Nord
+    const wallNorth = BABYLON.MeshBuilder.CreateBox("wallNorth", {
+        width: 50,
+        height: 5,
+        depth: 0.5
+    }, scene);
+    wallNorth.position = new BABYLON.Vector3(0, 0, 25);
+    wallNorth.material = wallMat;
+    wallNorth.checkCollisions = true;
+    world.walls.push(wallNorth);
+
+    // Mur Sud
+    const wallSouth = BABYLON.MeshBuilder.CreateBox("wallSouth", {
+        width: 50,
+        height: 5,
+        depth: 0.5
+    }, scene);
+    wallSouth.position = new BABYLON.Vector3(0, 0, -25);
+    wallSouth.material = wallMat;
+    wallSouth.checkCollisions = true;
+    world.walls.push(wallSouth);
+
+    // Mur Est
+    const wallEast = BABYLON.MeshBuilder.CreateBox("wallEast", {
+        width: 0.5,
+        height: 5,
+        depth: 50
+    }, scene);
+    wallEast.position = new BABYLON.Vector3(25, 0, 0);
+    wallEast.material = wallMat;
+    wallEast.checkCollisions = true;
+    world.walls.push(wallEast);
+
+    // Mur Ouest
+    const wallWest = BABYLON.MeshBuilder.CreateBox("wallWest", {
+        width: 0.5,
+        height: 5,
+        depth: 50
+    }, scene);
+    wallWest.position = new BABYLON.Vector3(-25, 0, 0);
+    wallWest.material = wallMat;
+    wallWest.checkCollisions = true;
+    world.walls.push(wallWest);
+
+    // Déplacer et ajuster le plateau de Tetris
+    boardMesh.position = new BABYLON.Vector3(BOARD_WIDTH / 2 - 0.5, BOARD_HEIGHT / 2, 0);
+    boardMesh.scaling = new BABYLON.Vector3(1, 1, 0.2);
+    boardMesh.scaling.z = 0.2;
+
+}
+
+// 4. Création du personnage (style Among Us)
+// Assurons-nous que les jambes sont correctement configurées pour l'animation
+function createPlayer() {
+    // Corps principal (ovale)
+    const body = BABYLON.MeshBuilder.CreateCapsule("playerBody", {
+        radius: 0.5,
+        height: 1.2,
+        subdivisions: 4
+    }, scene);
+
+    // Jambes
+    const legLeft = BABYLON.MeshBuilder.CreateBox("legLeft", {
+        width: 0.3,
+        height: 0.6,
+        depth: 0.3
+    }, scene);
+    legLeft.position = new BABYLON.Vector3(-0.25, -0.9, 0);
+    // Point de pivot pour la rotation des jambes
+    legLeft.setPivotPoint(new BABYLON.Vector3(0, 0.3, 0));
+
+    const legRight = BABYLON.MeshBuilder.CreateBox("legRight", {
+        width: 0.3,
+        height: 0.6,
+        depth: 0.3
+    }, scene);
+    legRight.position = new BABYLON.Vector3(0.25, -0.9, 0);
+    // Point de pivot pour la rotation des jambes
+    legRight.setPivotPoint(new BABYLON.Vector3(0, 0.3, 0));
+
+    // Visor (petit rectangle à l'avant)
+    const visor = BABYLON.MeshBuilder.CreateBox("visor", {
+        width: 0.7,
+        height: 0.3,
+        depth: 0.1
+    }, scene);
+    visor.position = new BABYLON.Vector3(0, 0.2, 0.5);
+
+    // Grouper les éléments
+    player.mesh = new BABYLON.Mesh("player", scene);
+    body.parent = player.mesh;
+    legLeft.parent = player.mesh;
+    legRight.parent = player.mesh;
+    visor.parent = player.mesh;
+
+    // Matériaux colorés
+    const bodyMat = new BABYLON.StandardMaterial("bodyMat", scene);
+    bodyMat.diffuseColor = new BABYLON.Color3(1, 0, 0); // Rouge
+    body.material = bodyMat;
+    legLeft.material = bodyMat;
+    legRight.material = bodyMat;
+
+    const visorMat = new BABYLON.StandardMaterial("visorMat", scene);
+    visorMat.diffuseColor = new BABYLON.Color3(0.2, 0.7, 1); // Bleu clair
+    visor.material = visorMat;
+
+    // Positionner le joueur
+    player.mesh.position = new BABYLON.Vector3(0, 0, -10);
+
+    // Attacher la caméra au joueur
+    updatePlayerCamera();
+
+    // Activer les collisions
+    player.mesh.checkCollisions = true;
+    scene.collisionsEnabled = true;
+}
+
+// 3. Modifier la fonction updatePlayerCamera pour gérer les deux modes
+function updatePlayerCamera() {
+    if (cameraMode === "fps") {
+        // Mode FPS (première personne)
+        camera.position = new BABYLON.Vector3(
+            player.mesh.position.x,
+            player.mesh.position.y + PLAYER_HEIGHT,
+            player.mesh.position.z
+        );
+        camera.setTarget(new BABYLON.Vector3(
+            player.mesh.position.x,
+            player.mesh.position.y + PLAYER_HEIGHT,
+            player.mesh.position.z + 1
+        ));
+    } else {
+        // Mode troisième personne
+        // Utiliser les rotations stockées pour calculer la position de la caméra
+        const verticalOffset = 2 + Math.sin(thirdPersonCameraRotationX) * 2;
+        const horizontalDistance = thirdPersonDistance * Math.cos(thirdPersonCameraRotationX);
+
+        // Position de la caméra autour du joueur basée sur la rotation Y
+        camera.position = new BABYLON.Vector3(
+            player.mesh.position.x - Math.sin(thirdPersonCameraRotationY) * horizontalDistance,
+            player.mesh.position.y + PLAYER_HEIGHT + verticalOffset,
+            player.mesh.position.z - Math.cos(thirdPersonCameraRotationY) * horizontalDistance
+        );
+
+        // La caméra regarde le joueur
+        camera.setTarget(new BABYLON.Vector3(
+            player.mesh.position.x,
+            player.mesh.position.y + PLAYER_HEIGHT / 2,
+            player.mesh.position.z
+        ));
+    }
+
+
+    camera.attachControl(canvas, true);
+    camera.applyGravity = false;
+}
+
+
+// 6. Fonction de gestion de la physique du joueur
+// Modification de la fonction updatePlayerPhysics pour gérer les animations et la caméra en 3ème personne
+function updatePlayerPhysics() {
+    if (!player.mesh || focusOnTetris || cameraTransition.active) return;
+
+    // Appliquer la gravité
+    player.velocity.y -= GRAVITY;
+
+    // Vérifier si le joueur est au sol
+    const wasOnGround = player.onGround;
+    player.onGround = player.mesh.position.y <= -2 + PLAYER_HEIGHT / 2;
+
+    // Limiter la position Y au sol
+    if (player.onGround) {
+        player.velocity.y = Math.max(0, player.velocity.y);
+        player.mesh.position.y = -2 + PLAYER_HEIGHT / 2;
+        player.canJump = true;
+
+        // Si le joueur vient d'atterrir après un saut
+        if (!wasOnGround && animationState === "jumping") {
+            animationState = "idle";
+        }
+    }
+
+    // Appliquer la vélocité
+    player.mesh.position.addInPlace(player.velocity);
+
+    // Mettre à jour la position de la caméra pour suivre le joueur
+    if (cameraMode === "fps") {
+        camera.position.x = player.mesh.position.x;
+        camera.position.y = player.mesh.position.y + PLAYER_HEIGHT / 2;
+        camera.position.z = player.mesh.position.z;
+    } else {
+        updatePlayerCamera(); // Mettre à jour la caméra en 3ème personne
+    }
+
+    // Animer le personnage
+    animatePlayer();
+
+    // Collisions simples avec les murs
+    const playerRadius = 0.5;
+    if (player.mesh.position.x > 25 - playerRadius) player.mesh.position.x = 25 - playerRadius;
+    if (player.mesh.position.x < -25 + playerRadius) player.mesh.position.x = -25 + playerRadius;
+    if (player.mesh.position.z > 25 - playerRadius) player.mesh.position.z = 25 - playerRadius;
+    if (player.mesh.position.z < -25 + playerRadius) player.mesh.position.z = -25 + playerRadius;
+}
+
+// 7. Gestion du saut
+function playerJump() {
+    if (player.canJump && player.onGround) {
+        player.velocity.y = JUMP_FORCE;
+        player.canJump = false;
+        animationState = "jumping";
+
+    }
+}
+// Caméra Minecraft-like
+const camera = new BABYLON.FreeCamera("camera", new BABYLON.Vector3(5, 10, -15), scene);
+camera.setTarget(new BABYLON.Vector3(5, 0, 0));
+camera.speed = 0.2;
+camera.angularSensibility = 3500;
+canvas.addEventListener("click", () => canvas.requestPointerLock());
+
+
+
+// Ajoutons une fonction pour utiliser la molette de la souris pour ajuster la distance de la caméra en mode 3ème personne
+window.addEventListener("wheel", (e) => {
+    if (cameraMode === "thirdPerson") {
+        // Ajuster la distance de la caméra avec la molette
+        thirdPersonDistance += e.deltaY * 0.01;
+
+        // Limiter la distance
+        thirdPersonDistance = Math.max(2, Math.min(20, thirdPersonDistance));
+
+        // Mettre à jour la caméra
+        updatePlayerCamera();
+    }
+});
+// Lumière
+const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+
+// Plateau
+const boardMesh = BABYLON.MeshBuilder.CreateBox("board", {
+    width: BOARD_WIDTH * CELL_SIZE,
+    height: BOARD_HEIGHT * CELL_SIZE,
+    depth: 1
+}, scene);
+boardMesh.position = new BABYLON.Vector3(
+    (BOARD_WIDTH / 2) - 0.5,
+    (BOARD_HEIGHT / 2) - 0.5,
+    0
+);
+boardMesh.material = new BABYLON.StandardMaterial("boardMat", scene);
+boardMesh.material.wireframe = true;
+
+// Matériaux
+const materials = {};
+Object.keys(TETROMINOS).forEach(key => {
+    materials[key] = new BABYLON.StandardMaterial(key + "Mat", scene);
+    materials[key].diffuseColor = TETROMINOS[key].color;
+});
+const ghostMat = new BABYLON.StandardMaterial("ghostMat", scene);
+ghostMat.diffuseColor = new BABYLON.Color3(1, 1, 1);
+ghostMat.alpha = 0.3;
+
+// UI éléments
+const nextPieceCanvas = document.getElementById("nextPiece");
+const nextPieceContext = nextPieceCanvas.getContext("2d");
+const restartButton = document.getElementById("restartGame");
+const gameOverModal = document.getElementById("gameOverModal");
+const finalScore = document.getElementById("finalScore");
+const playerNameModal = document.getElementById("playerNameModal");
+const saveScoreButton = document.getElementById("saveScore");
+const playAgainButton = document.getElementById("playAgain");
+
+// Fonction pour animer le personnage en fonction de son état
+// 1. Ajout d'une variable pour suivre l'animation de transition de la caméra
+let cameraTransition = {
+    active: false,
+    startTime: 0,
+    duration: 1000, // Durée de l'animation en ms
+    startPos: null,
+    startRot: null,
+    targetPos: null,
+    targetRot: null
+};
+
+// 2. Modification de la fonction animatePlayer pour corriger le problème de caméra en idle
+function animatePlayer() {
+    // Si le joueur n'existe pas, sortir
+    if (!player.mesh) return;
+
+    // Incrémenter le compteur d'animation
+    animationTime += 0.1;
+
+    // Animation en fonction de l'état
+    switch (animationState) {
+        case "idle":
+            // Légère oscillation en position idle - MAIS PAS DE CHANGEMENT DE HAUTEUR
+            // Nous retirons la ligne qui modifiait player.mesh.position.y
+            // player.mesh.position.y = -2 + PLAYER_HEIGHT/2 + Math.sin(animationTime * 0.5) * 0.03;
+            break;
+
+        case "walking":
+            // Animation de balancement pendant la marche
+            // Mouvement des jambes
+            const legLeft = player.mesh.getChildMeshes().find(m => m.name === "legLeft");
+            const legRight = player.mesh.getChildMeshes().find(m => m.name === "legRight");
+
+            if (legLeft && legRight) {
+                // Oscillation des jambes en opposition de phase
+                legLeft.rotation.x = Math.sin(animationTime * 2) * 0.5;
+                legRight.rotation.x = -Math.sin(animationTime * 2) * 0.5;
+            }
+
+            // Léger balancement du corps
+            player.mesh.rotation.z = Math.sin(animationTime) * 0.03;
+            break;
+
+        case "jumping":
+            // Animation de saut (pas besoin d'animation spéciale, la physique s'en charge)
+            break;
+    }
+}
+// Gestion des pièces
+function createNewPiece() {
+    // S'assurer que les anciens meshes sont supprimés
+    if (currentPiece && currentPiece.mesh) {
+        currentPiece.mesh.dispose();
+    }
+
+    if (!nextPiece) {
+        const types = Object.keys(TETROMINOS);
+        nextPiece = {
+            type: types[Math.floor(Math.random() * types.length)]
+        };
+        nextPiece.shape = TETROMINOS[nextPiece.type].shape;
+        nextPiece.color = materials[nextPiece.type];
+    }
+
+    currentPiece = nextPiece;
+    currentPiece.x = Math.floor((BOARD_WIDTH - currentPiece.shape[0].length) / 2);
+    currentPiece.y = 0;
+    currentPiece.mesh = null;
+
+    const types = Object.keys(TETROMINOS);
+    nextPiece = {
+        type: types[Math.floor(Math.random() * types.length)]
+    };
+    nextPiece.shape = TETROMINOS[nextPiece.type].shape;
+    nextPiece.color = materials[nextPiece.type];
+
+    updateNextPieceDisplay();
+    updatePieceMesh();
+    updateGhostPiece();
+
+    return !checkCollision(currentPiece.shape, currentPiece.x, currentPiece.y);
+}
+
+// 3. Fonction pour lancer l'animation de transition de la caméra vers le plateau de jeu
+function startCameraTransitionToBoard() {
+    if (cameraTransition.active) return;
+
+    cameraTransition.active = true;
+    cameraTransition.startTime = Date.now();
+
+    // Position et rotation actuelles comme point de départ
+    if (cameraMode === "fps") {
+        cameraTransition.startPos = camera.position.clone();
+        cameraTransition.startRot = camera.rotation.clone();
+    } else {
+        cameraTransition.startPos = camera.position.clone();
+        // Stocker la direction actuelle
+        cameraTransition.startRot = new BABYLON.Vector3(
+            camera.target.x - camera.position.x,
+            camera.target.y - camera.position.y,
+            camera.target.z - camera.position.z
+        ).normalize();
+    }
+
+    // Position et rotation cibles (face au plateau)
+    // Calculer une position idéale pour voir tout le plateau
+    const boardCenter = new BABYLON.Vector3(
+        BOARD_WIDTH / 2 - 0.5,
+        BOARD_HEIGHT / 2 - 0.5,
+        0
+    );
+
+    // Se placer à une distance adaptée devant le plateau
+    cameraTransition.targetPos = new BABYLON.Vector3(
+        boardCenter.x,
+        boardCenter.y,
+        -15 // Distance pour bien voir le plateau
+    );
+
+    // Viser le centre du plateau
+    if (cameraMode === "fps") {
+        // Pour le mode FPS, on définit une rotation précise
+        const targetDir = boardCenter.subtract(cameraTransition.targetPos);
+        const targetYaw = Math.atan2(targetDir.x, targetDir.z);
+        const targetPitch = Math.atan2(targetDir.y, Math.sqrt(targetDir.x * targetDir.x + targetDir.z * targetDir.z));
+
+        cameraTransition.targetRot = new BABYLON.Vector3(targetPitch, targetYaw, 0);
+    } else {
+        // Pour le mode 3ème personne, on définit une direction cible
+        cameraTransition.targetRot = boardCenter.subtract(cameraTransition.targetPos).normalize();
+    }
+}
+
+// 1. Modifiez la fonction updatePieceMesh pour aligner les pièces avec le plateau
+function updatePieceMesh() {
+    if (currentPiece.mesh) currentPiece.mesh.dispose();
+
+    // Créer un nouveau mesh parent
+    currentPiece.mesh = new BABYLON.Mesh("piece", scene);
+
+    // Ajouter chaque bloc à la pièce
+    for (let y = 0; y < currentPiece.shape.length; y++) {
+        for (let x = 0; x < currentPiece.shape[y].length; x++) {
+            if (currentPiece.shape[y][x]) {
+                // Créer le bloc
+                const block = BABYLON.MeshBuilder.CreateBox("block", {
+                    size: CELL_SIZE * 0.95
+                }, scene);
+
+                // Position relative au parent
+                block.position = new BABYLON.Vector3(x, -y, 0);
+
+                // Appliquer le matériau
+                block.material = currentPiece.color;
+
+                // Attacher au parent
+                block.parent = currentPiece.mesh;
+            }
+        }
+    }
+
+    // Positionner le mesh parent
+    currentPiece.mesh.position = new BABYLON.Vector3(
+        currentPiece.x,
+        BOARD_HEIGHT - currentPiece.y - 1,
+        0
+    );
+}
+
+
+
+// 4. Fonction pour mettre à jour l'animation de transition de la caméra
+function updateCameraTransition() {
+    if (!cameraTransition.active) return;
+
+    const currentTime = Date.now();
+    const elapsedTime = currentTime - cameraTransition.startTime;
+
+    // Calculer la progression de l'animation (0 à 1)
+    const t = Math.min(elapsedTime / cameraTransition.duration, 1);
+    // Utiliser une fonction d'easing pour une animation plus fluide
+    const easeT = easeInOutCubic(t);
+
+    // Interpoler la position
+    const newPos = BABYLON.Vector3.Lerp(
+        cameraTransition.startPos,
+        cameraTransition.targetPos,
+        easeT
+    );
+
+    // Appliquer la nouvelle position
+    camera.position = newPos;
+
+    if (cameraMode === "fps") {
+        // Interpoler la rotation en mode FPS
+        const newRot = BABYLON.Vector3.Lerp(
+            cameraTransition.startRot,
+            cameraTransition.targetRot,
+            easeT
+        );
+        camera.rotation = newRot;
+    } else {
+        // Interpoler la direction en mode 3ème personne
+        const newDir = BABYLON.Vector3.Lerp(
+            cameraTransition.startRot,
+            cameraTransition.targetRot,
+            easeT
+        ).normalize();
+
+        // Calculer la cible en fonction de la direction
+        const newTarget = newPos.add(newDir.scale(10)); // La distance n'est pas importante car on normalise
+        camera.setTarget(newTarget);
+    }
+
+    // Fin de l'animation
+    if (t >= 1) {
+        cameraTransition.active = false;
+    }
+}
+
+
+
+// Fonction d'easing pour une animation plus fluide
+function easeInOutCubic(t) {
+    return t < 0.5 ?
+        4 * t * t * t :
+        1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+
+
+
+// 2. Modifiez la fonction updateGhostPiece de la même manière
+function updateGhostPiece() {
+    if (ghostPiece && ghostPiece.mesh) {
+        ghostPiece.mesh.dispose();
+    }
+
+    ghostPiece = {
+        shape: currentPiece.shape,
+        x: currentPiece.x,
+        y: currentPiece.y
+    };
+
+    // Trouver la position finale du ghost
+    while (!checkCollision(ghostPiece.shape, ghostPiece.x, ghostPiece.y + 1)) {
+        ghostPiece.y++;
+    }
+
+    // Créer un nouveau mesh parent pour le ghost
+    ghostPiece.mesh = new BABYLON.Mesh("ghost", scene);
+
+    // Ajouter chaque bloc au ghost
+    for (let y = 0; y < ghostPiece.shape.length; y++) {
+        for (let x = 0; x < ghostPiece.shape[y].length; x++) {
+            if (ghostPiece.shape[y][x]) {
+                // Créer le bloc
+                const block = BABYLON.MeshBuilder.CreateBox("block", {
+                    size: CELL_SIZE * 0.95
+                }, scene);
+
+                // Position relative au parent
+                block.position = new BABYLON.Vector3(x, -y, 0);
+
+                // Appliquer le matériau ghost
+                block.material = ghostMat;
+
+                // Attacher au parent
+                block.parent = ghostPiece.mesh;
+            }
+        }
+    }
+
+    // Positionner le mesh parent du ghost
+    ghostPiece.mesh.position = new BABYLON.Vector3(
+        ghostPiece.x,
+        BOARD_HEIGHT - ghostPiece.y - 1,
+        0
+    );
+}
+
+function updateNextPieceDisplay() {
+    nextPieceContext.clearRect(0, 0, nextPieceCanvas.width, nextPieceCanvas.height);
+    const cellSize = 25;
+    for (let y = 0; y < nextPiece.shape.length; y++) {
+        for (let x = 0; x < nextPiece.shape[y].length; x++) {
+            if (nextPiece.shape[y][x]) {
+                nextPieceContext.fillStyle = TETROMINOS[nextPiece.type].color.toHexString();
+                nextPieceContext.fillRect(x * cellSize, y * cellSize, cellSize - 2, cellSize - 2);
+            }
+        }
+    }
+}
+
+// Collisions et mouvements
+function checkCollision(shape, x, y) {
+    for (let row = 0; row < shape.length; row++) {
+        for (let col = 0; col < shape[row].length; col++) {
+            if (shape[row][col]) {
+                const newX = x + col;
+                const newY = y + row;
+                if (newX < 0 || newX >= BOARD_WIDTH || newY >= BOARD_HEIGHT || (newY >= 0 && board[newY][newX])) return true;
+            }
+        }
+    }
+    return false;
+}
+
+function moveDown() {
+    if (!currentPiece || isPaused || isGameOver) return false;
+    if (!checkCollision(currentPiece.shape, currentPiece.x, currentPiece.y + 1)) {
+        currentPiece.y++;
+        updatePieceMesh();
+        updateGhostPiece();
+        return true;
+    }
+    placePiece();
+    updateBoard();
+    return false;
+}
+
+function moveLeft() {
+    if (!checkCollision(currentPiece.shape, currentPiece.x - 1, currentPiece.y)) {
+        currentPiece.x--;
+        updatePieceMesh();
+        updateGhostPiece();
+    }
+}
+
+function moveRight() {
+    if (!checkCollision(currentPiece.shape, currentPiece.x + 1, currentPiece.y)) {
+        currentPiece.x++;
+        updatePieceMesh();
+        updateGhostPiece();
+    }
+}
+
+function rotate() {
+    const shape = currentPiece.shape;
+    const rotatedShape = Array(shape[0].length).fill().map(() => []);
+    for (let i = 0; i < shape[0].length; i++) {
+        for (let j = 0; j < shape.length; j++) {
+            rotatedShape[i][j] = shape[shape.length - 1 - j][i];
+        }
+    }
+    if (!checkCollision(rotatedShape, currentPiece.x, currentPiece.y)) {
+        currentPiece.shape = rotatedShape;
+        updatePieceMesh();
+        updateGhostPiece();
+    }
+}
+
+function hardDrop() {
+    while (!checkCollision(currentPiece.shape, currentPiece.x, currentPiece.y + 1)) currentPiece.y++;
+    placePiece();
+    updateBoard();
+    if (!createNewPiece()) gameOver();
+}
+
+function placePiece() {
+    if (ghostPiece && ghostPiece.mesh) {
+        ghostPiece.mesh.dispose();
+        ghostPiece.mesh = null;
+    }
+
+    for (let y = 0; y < currentPiece.shape.length; y++) {
+        for (let x = 0; x < currentPiece.shape[y].length; x++) {
+            if (currentPiece.shape[y][x]) {
+                const boardY = currentPiece.y + y;
+                const boardX = currentPiece.x + x;
+                if (boardY >= 0 && boardY < BOARD_HEIGHT) board[boardY][boardX] = currentPiece.type;
+            }
+        }
+    }
+    checkLines();
+}
+
+
+// Gestion du plateau
+const fixedBlocks = [];
+
+function updateBoard() {
+    // Supprimer les anciens blocs
+    fixedBlocks.forEach(block => block.dispose());
+    fixedBlocks.length = 0;
+
+    // Créer les nouveaux blocs fixes
+    for (let y = 0; y < BOARD_HEIGHT; y++) {
+        for (let x = 0; x < BOARD_WIDTH; x++) {
+            if (board[y][x]) {
+                const block = BABYLON.MeshBuilder.CreateBox("block", {
+                    size: CELL_SIZE * 0.95
+                }, scene);
+
+                // Position cohérente avec les pièces
+                block.position = new BABYLON.Vector3(
+                    x,
+                    BOARD_HEIGHT - 1 - y,
+                    0
+                );
+
+                // Appliquer le matériau correspondant
+                block.material = materials[board[y][x]];
+
+                // Ajouter au tableau des blocs fixes
+                fixedBlocks.push(block);
+            }
+        }
+    }
+}
+
+function checkLines() {
+    let linesCleared = 0;
+    for (let y = BOARD_HEIGHT - 1; y >= 0; y--) {
+        if (board[y].every(cell => cell !== 0)) {
+            animateLineClear(y);
+            board.splice(y, 1);
+            board.unshift(Array(BOARD_WIDTH).fill(0));
+            linesCleared++;
+            y++;
+        }
+    }
+    if (linesCleared > 0) updateScore(linesCleared);
+}
+
+function animateLineClear(y) {
+    const line = BABYLON.MeshBuilder.CreateBox("line", {
+        width: BOARD_WIDTH,
+        height: CELL_SIZE,
+        depth: 1
+    }, scene);
+    line.position = new BABYLON.Vector3(BOARD_WIDTH / 2 - 0.5, BOARD_HEIGHT - 1 - y, 0);
+    line.material = new BABYLON.StandardMaterial("lineMat", scene);
+    line.material.diffuseColor = new BABYLON.Color3(1, 1, 1);
+    setTimeout(() => line.dispose(), 300);
+}
+
+// Score et niveau
+function updateScore(linesCleared) {
+    const points = [0, 40, 100, 300, 1200];
+    score += points[linesCleared] * level;
+    lines += linesCleared;
+    const newLevel = Math.floor(lines / 10) + 1;
+    if (newLevel > level && newLevel <= 10) {
+        level = newLevel;
+        gameSpeed = 1000 / level;
+        clearInterval(gameInterval);
+        gameInterval = setInterval(gameLoop, gameSpeed);
+        animateLevelUp();
+    }
+    document.getElementById("score").textContent = score;
+    document.getElementById("level").textContent = level;
+    document.getElementById("lines").textContent = lines;
+}
+
+function animateLevelUp() {
+    const text = new BABYLON.GUI.TextBlock();
+    text.text = `Niveau ${level}!`;
+    text.color = "yellow";
+    text.fontSize = 48;
+    const advancedTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI("UI");
+    advancedTexture.addControl(text);
+    setTimeout(() => advancedTexture.dispose(), 2000);
+}
+
+// Boucle de jeu
+function gameLoop() {
+    if (isPaused || isGameOver) return;
+    if (!moveDown() && !createNewPiece()) gameOver();
+}
+
+// 10. Modifiez la fonction initiale de démarrage du jeu
+function startGame() {
+    document.getElementById("gameContainer").style.display = "block";
+    resetGame();
+
+    // Initialiser l'environnement et le joueur si ce n'est pas déjà fait
+    if (!world.ground) {
+        setupEnvironment();
+    }
+
+    if (!player.mesh) {
+        createPlayer();
+    }
+
+    createNewPiece();
+    gameInterval = setInterval(gameLoop, gameSpeed);
+
+    // Mise à jour des instructions pour l'utilisateur
+    // Mise à jour des instructions pour l'utilisateur
+    alert("Appuyez sur T pour basculer entre le contrôle du personnage et du Tetris.\n" +
+        "F5 pour basculer entre la vue première personne et la vue troisième personne.\n" +
+        "En mode troisième personne: molette pour zoomer/dézoomer.\n" +
+        "En mode personnage: ZQSD pour se déplacer, Espace pour sauter, souris pour regarder.\n" +
+        "En mode Tetris: flèches pour déplacer les pièces, 0 pour la chute rapide, P pour pause.");
+}
+
+function resetGame() {
+    // Supprimer tous les blocs fixes
+    fixedBlocks.forEach(block => block.dispose());
+    fixedBlocks.length = 0;
+
+    // Supprimer la pièce courante si elle existe
+    if (currentPiece && currentPiece.mesh) {
+        currentPiece.mesh.dispose();
+        currentPiece = null;
+    }
+
+    // Supprimer le ghost si il existe
+    if (ghostPiece && ghostPiece.mesh) {
+        ghostPiece.mesh.dispose();
+        ghostPiece = null;
+    }
+
+    // Réinitialiser le plateau
+    board = Array(BOARD_HEIGHT).fill().map(() => Array(BOARD_WIDTH).fill(0));
+
+    // Réinitialiser les variables de jeu
+    score = 0;
+    level = 1;
+    lines = 0;
+    gameSpeed = 1000;
+    isGameOver = false;
+    isPaused = false;
+
+    // Mettre à jour l'affichage
+    document.getElementById("score").textContent = score;
+    document.getElementById("level").textContent = level;
+    document.getElementById("lines").textContent = lines;
+}
+
+
+
+
+function restartGame() {
+    clearInterval(gameInterval);
+    gameOverModal.style.display = "none";
+    startGame();
+}
+
+function gameOver() {
+    isGameOver = true;
+    clearInterval(gameInterval);
+    finalScore.textContent = score;
+    playerNameModal.value = playerName;
+    gameOverModal.style.display = "flex";
+}
+
+function saveHighScore() {
+    playerName = playerNameModal.value.trim() || "Anonyme";
+    highScores.push({
+        name: playerName,
+        score,
+        date: new Date().toISOString()
+    });
+    highScores.sort((a, b) => b.score - a.score);
+    highScores = highScores.slice(0, 10);
+    localStorage.setItem("tetrisHighScores", JSON.stringify(highScores));
+    displayHighScores();
+    gameOverModal.style.display = "none";
+}
+
+function loadHighScores() {
+    const saved = localStorage.getItem("tetrisHighScores");
+    if (saved) highScores = JSON.parse(saved);
+}
+
+function displayHighScores() {
+    const scoresList = document.getElementById("scoresList");
+    scoresList.innerHTML = highScores.map((s, i) => `${i + 1}. ${s.name}: ${s.score}`).join("<br>");
+}
+
+// Contrôles
+const keys = {};
+// 8. Gestionnaire de touches modifié
+window.addEventListener("keydown", (e) => {
+    keys[e.keyCode] = true;
+    if (e.keyCode === 116) { // 116 = F5
+        e.preventDefault(); // Empêcher le rechargement de la page
+        toggleCameraMode();
+    }
+    // Bascule entre le contrôle du Tetris et le déplacement du personnage
+    if (e.keyCode === 84) { // Touche T pour Toggle
+        const oldFocusState = focusOnTetris;
+        focusOnTetris = !focusOnTetris;
+
+        // Si on bascule vers le mode Tetris, lancer l'animation de la caméra
+        if (focusOnTetris && !oldFocusState) {
+            startCameraTransitionToBoard();
+        }
+    }
+
+    // Contrôles du jeu Tetris (actifs uniquement en mode focus)
+    if (focusOnTetris && !isGameOver) {
+        switch (e.keyCode) {
+            case 37:
+                moveLeft();
+                break; // Flèche gauche
+            case 39:
+                moveRight();
+                break; // Flèche droite
+            case 40:
+                moveDown();
+                break; // Flèche bas  
+            case 38:
+                rotate();
+                break; // Flèche haut (rotation)
+            case 96:
+                hardDrop();
+                break; // Touche 0 (chute rapide)
+            case 80:
+                togglePause();
+                break; // P (pause)
+        }
+    }
+    // Contrôles du saut du joueur (actifs uniquement hors mode focus)
+    else if (!focusOnTetris) {
+        if (e.keyCode === 32) { // Espace pour sauter
+            playerJump();
+        }
+    }
+});
+
+window.addEventListener("keyup", (e) => keys[e.keyCode] = false);
+
+function togglePause() {
+    if (!gameInterval || isGameOver) return;
+    isPaused = !isPaused;
+    if (isPaused) alert("Pause");
+}
+
+document.addEventListener("mousemove", (e) => {
+    if (document.pointerLockElement === canvas) {
+        if (cameraMode === "fps") {
+            // Mode première personne - rotation normale
+            camera.rotation.y += e.movementX * 0.002;
+            camera.rotation.x += e.movementY * 0.002;
+            camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x));
+        } else {
+            // Mode troisième personne - rotation autour du joueur
+            thirdPersonCameraRotationY += e.movementX * 0.002;
+            thirdPersonCameraRotationX -= e.movementY * 0.002;
+
+            // Limiter la rotation verticale
+            thirdPersonCameraRotationX = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, thirdPersonCameraRotationX));
+
+            // Mettre à jour la caméra
+            updatePlayerCamera();
+        }
+    }
+});
+
+scene.onBeforeRenderObservable.add(() => {
+    updateCameraTransition();
+    // Mise à jour de la physique du joueur
+    updatePlayerPhysics();
+
+    // Déplacement du joueur (seulement si on n'est pas en mode focus sur Tetris)
+    if (document.pointerLockElement === canvas && !focusOnTetris && !cameraTransition.active) {
+        // Détermine la direction de déplacement basée sur le mode de caméra
+        let forwardDirection, rightDirection;
+
+        if (cameraMode === "fps") {
+            // En FPS, on se base sur la rotation de la caméra
+            forwardDirection = new BABYLON.Vector3(
+                Math.sin(camera.rotation.y),
+                0,
+                Math.cos(camera.rotation.y)
+            );
+
+            rightDirection = new BABYLON.Vector3(
+                Math.sin(camera.rotation.y + Math.PI / 2),
+                0,
+                Math.cos(camera.rotation.y + Math.PI / 2)
+            );
+        } else {
+            // En 3ème personne, on se base sur la rotation Y de la caméra en 3ème personne
+            forwardDirection = new BABYLON.Vector3(
+                Math.sin(thirdPersonCameraRotationY),
+                0,
+                Math.cos(thirdPersonCameraRotationY)
+            );
+
+            rightDirection = new BABYLON.Vector3(
+                Math.sin(thirdPersonCameraRotationY + Math.PI / 2),
+                0,
+                Math.cos(thirdPersonCameraRotationY + Math.PI / 2)
+            );
+        }
+
+        // Flag pour savoir si le joueur se déplace
+        let isMoving = false;
+
+        // ZQSD pour déplacer le joueur
+        if (keys[90]) { // Z
+            player.mesh.position.addInPlace(forwardDirection.scale(PLAYER_SPEED));
+            isMoving = true;
+        }
+        if (keys[83]) { // S
+            player.mesh.position.addInPlace(forwardDirection.scale(-PLAYER_SPEED));
+            isMoving = true;
+        }
+        if (keys[68]) { // D
+            player.mesh.position.addInPlace(rightDirection.scale(PLAYER_SPEED));
+            isMoving = true;
+        }
+        if (keys[81]) { // Q
+            player.mesh.position.addInPlace(rightDirection.scale(-PLAYER_SPEED));
+            isMoving = true;
+        }
+
+        // Mise à jour de l'état d'animation
+        if (isMoving && player.onGround) {
+            animationState = "walking";
+        } else if (player.onGround && animationState !== "jumping") {
+            animationState = "idle";
+        }
+
+        // Rotation du personnage pour qu'il regarde dans la direction de déplacement
+        if (isMoving) {
+            let targetYaw;
+
+            // Calculer l'angle cible en fonction des touches pressées
+            if (keys[90] && !keys[83] && !keys[68] && !keys[81]) {
+                // Uniquement avant (Z)
+                targetYaw = thirdPersonCameraRotationY;
+            } else if (keys[83] && !keys[90] && !keys[68] && !keys[81]) {
+                // Uniquement arrière (S)
+                targetYaw = thirdPersonCameraRotationY + Math.PI;
+            } else if (keys[68] && !keys[90] && !keys[83] && !keys[81]) {
+                // Uniquement droite (D)
+                targetYaw = thirdPersonCameraRotationY + Math.PI / 2;
+            } else if (keys[81] && !keys[90] && !keys[83] && !keys[68]) {
+                // Uniquement gauche (Q)
+                targetYaw = thirdPersonCameraRotationY - Math.PI / 2;
+            } else if (keys[90] && keys[68]) {
+                // Avant-droite
+                targetYaw = thirdPersonCameraRotationY + Math.PI / 4;
+            } else if (keys[90] && keys[81]) {
+                // Avant-gauche
+                targetYaw = thirdPersonCameraRotationY - Math.PI / 4;
+            } else if (keys[83] && keys[68]) {
+                // Arrière-droite
+                targetYaw = thirdPersonCameraRotationY + Math.PI * 3 / 4;
+            } else if (keys[83] && keys[81]) {
+                // Arrière-gauche
+                targetYaw = thirdPersonCameraRotationY - Math.PI * 3 / 4;
+            }
+
+            // Appliquer la rotation
+            player.mesh.rotation.y = targetYaw;
+        }
+    }
+});
+
+// Initialisation
+loadHighScores();
+displayHighScores();
+restartButton.addEventListener("click", restartGame);
+saveScoreButton.addEventListener("click", saveHighScore);
+playAgainButton.addEventListener("click", restartGame);
+startGame();
+
+engine.runRenderLoop(() => scene.render());
+window.addEventListener("resize", () => engine.resize());
+
+</script>
+</body>
+</html>
